@@ -10,9 +10,12 @@
 #ifndef GOOGLE_PROTOBUF_ARENA_H__
 #define GOOGLE_PROTOBUF_ARENA_H__
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <memory>
 #include <new>  // IWYU pragma: keep for operator new().
 #include <string>
 #include <type_traits>
@@ -28,9 +31,7 @@ using type_info = ::type_info;
 #endif
 
 #include "absl/base/attributes.h"
-#include "absl/base/macros.h"
 #include "absl/base/optimization.h"
-#include "absl/base/prefetch.h"
 #include "absl/log/absl_check.h"
 #include "absl/utility/internal/if_constexpr.h"
 #include "google/protobuf/arena_align.h"
@@ -265,26 +266,63 @@ class PROTOBUF_EXPORT PROTOBUF_ALIGNAS(8) Arena final {
   // Create an array of object type T on the arena *without* invoking the
   // constructor of T. If `arena` is null, then the return value should be freed
   // with `delete[] x;` (or `::operator delete[](x);`).
-  // To ensure safe uses, this function checks at compile time
-  // (when compiled as C++11) that T is trivially default-constructible and
-  // trivially destructible.
+  //
+  // The optional `align` parameter can be used to pre-allocate correctly
+  // aligned raw storage for an object(s) of a type for which only the size and
+  // alignment are known, or when the constructors shouldn't be invoked:
+  //
+  // `char* buffer = CreateArray<char>(..., size, alignment)`.
+  //
+  // The following restrictions on `align` apply:
+  //
+  // `align` >= `alignof(T)`
+  //
+  // To ensure safe uses, this function checks at compile time (when compiled as
+  // C++11) that T is trivially default-constructible and trivially
+  // destructible.
   template <typename T>
   PROTOBUF_NDEBUG_INLINE static T* CreateArray(Arena* arena,
-                                               size_t num_elements) {
+                                               size_t num_elements,
+                                               size_t align = alignof(T)) {
     static_assert(std::is_trivial<T>::value,
                   "CreateArray requires a trivially constructible type");
     static_assert(std::is_trivially_destructible<T>::value,
                   "CreateArray requires a trivially destructible type");
     ABSL_CHECK_LE(num_elements, std::numeric_limits<size_t>::max() / sizeof(T))
         << "Requested size is too large to fit into size_t.";
-    if (ABSL_PREDICT_FALSE(arena == nullptr)) {
-      return new T[num_elements];
+    ABSL_CHECK_GE(align, alignof(T))
+        << "Aligning narrower than type's own alignment is not supported";
+    void* alloc = nullptr;
+    if (ABSL_PREDICT_FALSE(num_elements == 0)) {
+      // Normalize a difference in behavior for zero-sized arrays: `new` returns
+      // non-null `AllocateAlignedForArray()` returns null. We default to null.
+    } else if (ABSL_PREDICT_FALSE(arena == nullptr)) {
+      // Aligned-`new` is a bit slower, and pointers allocated with it should be
+      // deallocated with a matching aligned-`delete`, so we branch here for
+      // speed and backwards compatibility.
+      if (ABSL_PREDICT_TRUE(align == alignof(T))) {
+        alloc = new T[num_elements];
+      } else {
+        alloc = new (std::align_val_t{align}) T[num_elements];
+      }
     } else {
-      // We count on compiler to realize that if sizeof(T) is a multiple of
-      // 8 AlignUpTo can be elided.
-      return static_cast<T*>(
-          arena->AllocateAlignedForArray(sizeof(T) * num_elements, alignof(T)));
+      // `AllocateAlignedForArray()` requires the size to be a multiple of
+      // alignment, so we possibly overallocate by up to `align` - 1 bytes.
+      const size_t array_bytes = sizeof(T) * num_elements;
+      const size_t alloc_bytes = (array_bytes + align - 1) / align * align;
+      alloc = arena->AllocateAlignedForArray(alloc_bytes, align);
     }
+    const size_t misaligned_by = reinterpret_cast<uintptr_t>(alloc) % align;
+    const bool alloc_ok = misaligned_by == 0 || alloc == nullptr;
+    ABSL_CHECK(alloc_ok)                     //
+        << "arena=" << arena                 //
+        << " num_elements=" << num_elements  //
+        << " align=" << align                //
+        << " alignof(T)=" << alignof(T)      //
+        << " sizeof(T)=" << sizeof(T)        //
+        << " alloc=" << alloc                //
+        << " misaligned_by=" << misaligned_by;
+    return static_cast<T*>(alloc);
   }
 
   // The following routines are for monitoring. They will approximate the total
