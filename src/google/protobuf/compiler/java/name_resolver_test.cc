@@ -15,6 +15,10 @@
 #include "google/protobuf/compiler/java/test_file_name_2024.pb.h"
 #include "google/protobuf/compiler/java/test_multiple_file_no.pb.h"
 #include "google/protobuf/compiler/java/test_multiple_file_yes.pb.h"
+#include "google/protobuf/compiler/java/test_nested_in_file_class_2024.pb.h"
+
+// Must be last.
+#include "google/protobuf/port_def.inc"
 
 namespace google {
 namespace protobuf {
@@ -180,8 +184,93 @@ TEST(NameResolverTest, GetJavaClassNameMultipleFilesEnumEdition2023) {
             "MultipleFileNoEnum");
 }
 
+TEST(NameResolverTest, GetClassNameMultipleFilesServiceEdition2024) {
+  ClassNameResolver resolver;
+
+  EXPECT_EQ(
+      resolver.GetClassName(protobuf_unittest::UnnestedService::descriptor(),
+                            /* immutable = */ true),
+      PACKAGE_PREFIX "protobuf_unittest.UnnestedService");
+  EXPECT_EQ(resolver.GetClassName(
+                protobuf_unittest::NestedInFileClassService::descriptor(),
+                /* immutable = */ true),
+            PACKAGE_PREFIX
+            "protobuf_unittest.TestNestedInFileClass2024Proto."
+            "NestedInFileClassService");
+}
+
+TEST(NameResolverTest, GetJavaClassNameMultipleFilesServiceEdition2024) {
+  ClassNameResolver resolver;
+
+  EXPECT_EQ(resolver.GetJavaImmutableClassName(
+                protobuf_unittest::UnnestedService::descriptor()),
+            PACKAGE_PREFIX "protobuf_unittest.UnnestedService");
+  EXPECT_EQ(resolver.GetJavaImmutableClassName(
+                protobuf_unittest::NestedInFileClassService::descriptor()),
+            PACKAGE_PREFIX
+            "protobuf_unittest.TestNestedInFileClass2024Proto$"
+            "NestedInFileClassService");
+}
+
+TEST(NameResolverTest, GetClassNameMultipleFilesMessageEdition2024) {
+  ClassNameResolver resolver;
+
+  EXPECT_EQ(
+      resolver.GetClassName(protobuf_unittest::UnnestedMessage::descriptor(),
+                            /* immutable = */ true),
+      PACKAGE_PREFIX "protobuf_unittest.UnnestedMessage");
+  EXPECT_EQ(resolver.GetClassName(
+                protobuf_unittest::NestedInFileClassMessage::descriptor(),
+                /* immutable = */ true),
+            PACKAGE_PREFIX
+            "protobuf_unittest.TestNestedInFileClass2024Proto."
+            "NestedInFileClassMessage");
+}
+
+TEST(NameResolverTest, GetJavaClassNameMultipleFilesMessageEdition2024) {
+  ClassNameResolver resolver;
+
+  EXPECT_EQ(resolver.GetJavaImmutableClassName(
+                protobuf_unittest::UnnestedMessage::descriptor()),
+            PACKAGE_PREFIX "protobuf_unittest.UnnestedMessage");
+  EXPECT_EQ(resolver.GetJavaImmutableClassName(
+                protobuf_unittest::NestedInFileClassMessage::descriptor()),
+            PACKAGE_PREFIX
+            "protobuf_unittest.TestNestedInFileClass2024Proto$"
+            "NestedInFileClassMessage");
+}
+
+TEST(NameResolverTest, GetClassNameMultipleFilesEnumEdition2024) {
+  ClassNameResolver resolver;
+
+  EXPECT_EQ(resolver.GetClassName(protobuf_unittest::UnnestedEnum_descriptor(),
+                                  /* immutable = */ true),
+            PACKAGE_PREFIX "protobuf_unittest.UnnestedEnum");
+  EXPECT_EQ(
+      resolver.GetClassName(protobuf_unittest::NestedInFileClassEnum_descriptor(),
+                            /* immutable = */ true),
+      PACKAGE_PREFIX
+      "protobuf_unittest.TestNestedInFileClass2024Proto."
+      "NestedInFileClassEnum");
+}
+
+TEST(NameResolverTest, GetJavaClassNameMultipleFilesEnumEdition2024) {
+  ClassNameResolver resolver;
+
+  EXPECT_EQ(resolver.GetJavaImmutableClassName(
+                protobuf_unittest::UnnestedEnum_descriptor()),
+            PACKAGE_PREFIX "protobuf_unittest.UnnestedEnum");
+  EXPECT_EQ(resolver.GetJavaImmutableClassName(
+                protobuf_unittest::NestedInFileClassEnum_descriptor()),
+            PACKAGE_PREFIX
+            "protobuf_unittest.TestNestedInFileClass2024Proto$"
+            "NestedInFileClassEnum");
+}
+
 }  // namespace
 }  // namespace java
 }  // namespace compiler
 }  // namespace protobuf
 }  // namespace google
+
+#include "google/protobuf/port_undef.inc"

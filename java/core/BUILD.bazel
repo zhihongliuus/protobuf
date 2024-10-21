@@ -445,6 +445,7 @@ junit_tests(
         ":java_test_protos_java_proto",
         ":lite_test_protos_java_proto",
         ":test_util",
+        "//src/google/protobuf/compiler/java:TestNestedInFileClassJavaProto",
         "@protobuf_maven//:com_google_guava_guava",
         "@protobuf_maven//:com_google_truth_truth",
         "@protobuf_maven//:junit_junit",
