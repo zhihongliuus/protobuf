@@ -8,6 +8,7 @@
 #include "upb/message/copy.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "upb/base/descriptor_constants.h"
@@ -280,12 +281,13 @@ upb_Message* _upb_Message_Copy(upb_Message* dst, const upb_Message* src,
   }
 
   // Clone unknowns.
-  size_t unknown_size = 0;
-  const char* ptr = upb_Message_GetUnknown(src, &unknown_size);
-  if (unknown_size != 0) {
-    UPB_ASSERT(ptr);
+  uintptr_t iter = kUpb_Message_UnknownBegin;
+  upb_StringView unknown;
+  while (upb_Message_NextUnknown(src, &unknown, &iter)) {
+    UPB_ASSERT(unknown.data);
     // Make a copy into destination arena.
-    if (!UPB_PRIVATE(_upb_Message_AddUnknown)(dst, ptr, unknown_size, arena)) {
+    if (!UPB_PRIVATE(_upb_Message_AddUnknown)(dst, unknown.data, unknown.size,
+                                              arena)) {
       return NULL;
     }
   }

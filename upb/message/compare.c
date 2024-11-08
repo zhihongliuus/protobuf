@@ -8,8 +8,10 @@
 #include "upb/message/compare.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "upb/base/descriptor_constants.h"
+#include "upb/base/string_view.h"
 #include "upb/message/accessors.h"
 #include "upb/message/array.h"
 #include "upb/message/internal/accessors.h"
@@ -182,11 +184,19 @@ bool upb_Message_IsEqual(const upb_Message* msg1, const upb_Message* msg2,
   if (!(options & kUpb_CompareOption_IncludeUnknownFields)) return true;
 
   // Check the unknown fields.
-  size_t usize1, usize2;
-  const char* uf1 = upb_Message_GetUnknown(msg1, &usize1);
-  const char* uf2 = upb_Message_GetUnknown(msg2, &usize2);
+  uintptr_t iter = kUpb_Message_UnknownBegin;
+  upb_StringView view1, view2;
+  while (upb_Message_NextUnknown(msg1, &view1, &iter) &&
+         upb_Message_NextUnknown(msg2, &view2, &iter)) {
+    const char* uf1 = view1.data;
+    const char* uf2 = view2.data;
+    // The wire encoder enforces a maximum depth of 100 so we match that here.
+    if (UPB_PRIVATE(_upb_Message_UnknownFieldsAreEqual)(uf1, view1.size, uf2,
+                                                        view2.size, 100) !=
+        kUpb_UnknownCompareResult_Equal) {
+      return false;
+    }
+  }
 
-  // The wire encoder enforces a maximum depth of 100 so we match that here.
-  return UPB_PRIVATE(_upb_Message_UnknownFieldsAreEqual)(
-             uf1, usize1, uf2, usize2, 100) == kUpb_UnknownCompareResult_Equal;
+  return true;
 }

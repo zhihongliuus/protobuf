@@ -565,11 +565,10 @@ static void encode_message(upb_encstate* e, const upb_Message* msg,
   }
 
   if ((e->options & kUpb_EncodeOption_SkipUnknown) == 0) {
-    size_t unknown_size;
-    const char* unknown = upb_Message_GetUnknown(msg, &unknown_size);
-
-    if (unknown) {
-      encode_bytes(e, unknown, unknown_size);
+    uintptr_t iter = kUpb_Message_UnknownBegin;
+    upb_StringView unknown;
+    while (upb_Message_NextUnknown(msg, &unknown, &iter)) {
+      encode_bytes(e, unknown.data, unknown.size);
     }
   }
 
