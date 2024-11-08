@@ -124,6 +124,7 @@ struct PROTOBUF_EXPORT TailCallTableInfo {
       const Descriptor* desc;
       uint32_t offset;
       EnumRange enum_range;
+      // AllocTraits alloc_traits;
     };
   };
   std::vector<AuxEntry> aux_entries;

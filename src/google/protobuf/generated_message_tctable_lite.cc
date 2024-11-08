@@ -515,10 +515,15 @@ PROTOBUF_ALWAYS_INLINE MessageLite* TcParser::NewMessage(
   return table->class_data->New(arena);
 }
 
+// DO NOT SUBMIT: Redo via `field.AddMessage()`, and remove `NewMessage()`.
 MessageLite* TcParser::AddMessage(const TcParseTableBase* table,
                                   RepeatedPtrFieldBase& field) {
+  field.set_alloc_traits(internal::AllocTraits{
+      /*size_of=*/table->class_data->allocation_size(),
+      /*align_of=*/alignof(std::max_align_t),
+      /*type_name=*/typeid(decltype(NewMessage(table, nullptr))).name()});
   return static_cast<MessageLite*>(field.AddInternal(
-      [table](Arena* arena) { return NewMessage(table, arena); }));
+      [table](Arena* arena, void*& ptr) { ptr = NewMessage(table, arena); }));
 }
 
 template <typename TagType, bool group_coding, bool aux_is_table>

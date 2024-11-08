@@ -24,9 +24,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <new>
+#include <ostream>  // DO NOT SUBMIT
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -34,8 +36,10 @@
 #include "absl/base/attributes.h"
 #include "absl/base/optimization.h"
 #include "absl/base/prefetch.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/log/absl_check.h"
 #include "absl/meta/type_traits.h"
+#include "absl/strings/string_view.h"  // DO NOT SUBMIT
 #include "google/protobuf/arena.h"
 #include "google/protobuf/internal_visibility.h"
 #include "google/protobuf/message_lite.h"
@@ -74,6 +78,18 @@ class RepeatedPtrOverPtrsIterator;
 
 namespace internal {
 
+// TODO(): Convert to `inline constexpr` var.
+template <typename T, int D, typename = void>
+struct IsCompleteTypeHelper : std::false_type {};
+
+// TODO(): Convert to `inline constexpr` var.
+template <typename T, int D>
+struct IsCompleteTypeHelper<T, D, std::enable_if_t<sizeof(T) == sizeof(T)>>
+    : std::true_type {};
+
+#define PROTOBUF_IS_COMPLETE_TYPE(T) \
+  ::google::protobuf::internal::IsCompleteTypeHelper<T, __COUNTER__>::value
+
 // Swaps two non-overlapping blocks of memory of size `N`
 template <size_t N>
 inline void memswap(char* PROTOBUF_RESTRICT a, char* PROTOBUF_RESTRICT b) {
@@ -99,8 +115,110 @@ PROTOBUF_EXPORT std::string* CloneSlow(Arena* arena, const std::string& value);
 template <typename Type>
 class GenericTypeHandler;
 
-// This is the common base class for RepeatedPtrFields.  It deals only in void*
-// pointers.  Users should not use this interface directly.
+using ElementFactory = absl::AnyInvocable<void(Arena* arena, void*& ptr)>;
+
+// Encodes the minimum information about a type required to allocate raw storage
+// for objects of that type.
+class AllocTraits {
+  // Might include file, line, method.
+  static constexpr int kMaxSymbolLength = 256;
+
+ public:
+  constexpr AllocTraits() = default;
+
+  constexpr AllocTraits(size_t size_of, size_t align_of,
+                        const char* type_name) {
+    size_of_ = static_cast<decltype(size_of_)>(size_of);
+    align_of_ = static_cast<decltype(align_of_)>(align_of);
+    type_name_ = type_name;
+    type_source_ = "DirectValues";
+    SetCallerFromCtor();
+  }
+
+  template <typename Type>
+  static constexpr AllocTraits FromType() {
+    static_assert(std::is_object<Type>::value, "");
+    AllocTraits result;
+    if constexpr (std::is_base_of_v<MessageLite, Type>) {
+      const internal::ClassData* class_data =
+          internal::MessageTraits<Type>::class_data();
+      result.type_source_ = "Type: MessageTraits";
+      result.size_of_ = class_data->allocation_size();
+      result.align_of_ = class_data->alignment();
+    } else {
+      result.type_source_ = "Type: Direct";
+      result.size_of_ = sizeof(Type);
+      result.align_of_ = alignof(Type);
+    }
+    result.type_name_ = typeid(Type).name();
+    result.SetCallerFromCtor();
+    return result;
+  }
+
+  template <typename Type>
+  static constexpr AllocTraits FromValue(const Type& value) {
+    static_assert(std::is_object_v<Type>, "");
+    AllocTraits result;
+    if constexpr (std::is_base_of_v<MessageLite, Type>) {
+      const internal::ClassData* class_data = internal::GetClassData(value);
+      result.type_source_ = "Value: ClassData";
+      result.size_of_ = class_data->allocation_size();
+      result.align_of_ = class_data->alignment();
+    } else {
+      static_assert(PROTOBUF_IS_COMPLETE_TYPE(Type), "");
+      result.type_source_ = "Value: Direct type";
+      result.size_of_ = sizeof(Type);
+      result.align_of_ = alignof(Type);
+    }
+    result.type_name_ = typeid(Type).name();
+    result.SetCallerFromCtor();
+    return result;
+  }
+
+  size_t size_of() const { return size_of_; }
+  size_t align_of() const { return align_of_; }
+  bool is_set() const { return size_of_ > 0 && align_of_ > 0; }
+
+ private:
+  friend std::ostream& operator<<(std::ostream& os, const AllocTraits& v) {
+    return os << (v.caller_ != nullptr ? v.caller_ : "UnknownCaller") << " -> "
+              << (v.type_name_ != nullptr ? v.type_name_ : "UnknownType")
+              << " (from "
+              << (v.type_source_ != nullptr ? v.type_source_ : "UnknownSource")
+              << "): " << v.size_of_ << " / " << (0 + v.align_of_);
+  }
+
+  // DO NOT SUBMIT: Remove after debugging.
+  void SetCallerFromCtor() {
+#if 0
+    // Maximum number of frames to print.
+    constexpr int kMaxDepth = 1;
+    // Skip 1 frame: skip this function itself and the calling ctor.
+    constexpr int kFramesToSkip = 2;
+    // Capture the PCs as addresses, e.g "0xffff4c80".
+    void* pcs[kMaxDepth];
+    [[maybe_unused]] const int depth =
+        absl::GetStackTrace(pcs, kMaxDepth, kFramesToSkip);
+    // Convert to method name symbols. Some binaries support C++ demangling.
+    // With debug builds (or "--fission=yes --strip=never"), these can include
+    // file and line numbers.
+    char caller[kMaxSymbolLength];
+    absl::Symbolize(pcs[0], caller, kMaxSymbolLength);
+    caller_ = new char[std::strlen(caller) + 1];
+    absl::SNPrintF(caller_, kMaxSymbolLength, "%s", caller);
+#endif
+  }
+
+  size_t size_of_ = 0;
+  uint8_t align_of_ = 0;
+  // DO NOT SUBMIT: Remove the members below after debugging.
+  const char* type_name_ = nullptr;
+  const char* type_source_ = nullptr;
+  char* caller_ = nullptr;
+};
+
+// This is the common base class for RepeatedPtrFields.  It deals only in
+// void* pointers.  Users should not use this interface directly.
 //
 // The methods of this interface correspond to the methods of RepeatedPtrField,
 // but may have a template argument called TypeHandler.  Its signature is:
@@ -109,7 +227,8 @@ class GenericTypeHandler;
 //     using Type = MyType;
 //
 //     static Type*(*)(Arena*) GetNewFunc();
-//     static void GetArena(Type* value);
+//     static Type*(*)(Arena*) GetNewFromPrototypeFunc(const Type* prototype);
+//     static Arena* GetArena(Type* value);
 //
 //     static Type* New(Arena* arena, Type&& value);
 //     static void Delete(Type*, Arena* arena);
@@ -123,8 +242,6 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
   using Value = typename TypeHandler::Type;
 
   static constexpr int kSSOCapacity = 1;
-
-  using ElementFactory = void* (*)(Arena*);
 
  protected:
   // We use the same TypeHandler for all Message types to deduplicate generated
@@ -155,6 +272,14 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
     if (arena_) (void)arena_->SpaceAllocated();
 #endif
   }
+
+  void set_alloc_traits(AllocTraits alloc_traits) {
+    alloc_traits_ = alloc_traits;
+  }
+  void set_alloc_traits(const RepeatedPtrFieldBase& other) {
+    alloc_traits_ = other.alloc_traits_;
+  }
+  bool is_alloc_traits_set() const { return alloc_traits_.is_set(); }
 
   bool empty() const { return current_size_ == 0; }
   int size() const { return current_size_; }
@@ -189,10 +314,7 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
 
   template <typename TypeHandler>
   Value<TypeHandler>* Add() {
-    if (std::is_same<Value<TypeHandler>, std::string>{}) {
-      return cast<TypeHandler>(AddString());
-    }
-    return cast<TypeHandler>(AddMessageLite(TypeHandler::GetNewFunc()));
+    return cast<TypeHandler>(AddInternal(TypeHandler::GetNewFunc()));
   }
 
   template <typename TypeHandler>
@@ -208,6 +330,14 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
     if (!using_sso()) ++rep()->allocated_size;
     auto* result = TypeHandler::New(arena_, std::move(value));
     element_at(ExchangeCurrentSize(current_size_ + 1)) = result;
+  }
+
+  template <typename Type>
+  Type* AddFromPrototype(const Type* prototype) {
+    using TypeHandler = GenericTypeHandler<Type>;
+    using H = CommonHandler<TypeHandler>;
+    return cast<TypeHandler>(
+        AddInternal(H::GetNewFromPrototypeFunc(prototype)));
   }
 
   // Must be called from destructor.
@@ -252,12 +382,6 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
     return *cast<TypeHandler>(element_at(index));
   }
 
-  // Creates and adds an element using the given prototype, without introducing
-  // a link-time dependency on the concrete message type.
-  //
-  // Pre-condition: prototype must not be nullptr.
-  MessageLite* AddMessage(const MessageLite* prototype);
-
   template <typename TypeHandler>
   void Clear() {
     const int n = current_size_;
@@ -272,6 +396,10 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
   template <typename T>
   void MergeFrom(const RepeatedPtrFieldBase& from) {
     static_assert(std::is_base_of<MessageLite, T>::value, "");
+    if (from.current_size_ == 0) return;
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(from);
+    }
 #ifdef __cpp_if_constexpr
     if constexpr (!std::is_base_of<Message, T>::value) {
       // For LITE objects we use the generic MergeFrom to save on binary size.
@@ -422,6 +550,9 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
   template <typename TypeHandler>
   void UnsafeArenaAddAllocated(Value<TypeHandler>* value) {
     ABSL_DCHECK_NE(value, nullptr);
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(AllocTraits::FromValue(*value));
+    }
     // Make room for the new pointer.
     if (SizeAtCapacity()) {
       // The array is completely full with no cleared objects, so grow it.
@@ -720,10 +851,6 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
     return InternalExtend(n - Capacity());
   }
 
-  // Internal helpers for Add that keep definition out-of-line.
-  void* AddMessageLite(ElementFactory factory);
-  void* AddString();
-
   // Common implementation used by various Add* methods. `factory` is an object
   // used to construct a new element unless there are spare cleared elements
   // ready for reuse. Returns pointer to the new element.
@@ -731,8 +858,7 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
   // Note: avoid inlining this function in methods such as `Add()` as this would
   // drastically increase binary size due to template instantiation and implicit
   // inlining.
-  template <typename Factory>
-  void* AddInternal(Factory factory);
+  void* AddInternal(ElementFactory factory);
 
   // A few notes on internal representation:
   //
@@ -749,6 +875,7 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
   int current_size_;
   int capacity_proxy_;  // we store `capacity - kSSOCapacity` as an optimization
   Arena* arena_;
+  AllocTraits alloc_traits_;
 };
 
 // Appends all message values from `from` to this instance using the abstract
@@ -770,12 +897,12 @@ void RepeatedPtrFieldBase::MergeFrom<std::string>(
     const RepeatedPtrFieldBase& from);
 
 
-template <typename Factory>
-void* RepeatedPtrFieldBase::AddInternal(Factory factory) {
+// DO NOT SUBMIT: Test inline vs non-inline.
+inline void* RepeatedPtrFieldBase::AddInternal(ElementFactory factory) {
   Arena* const arena = GetArena();
   if (tagged_rep_or_elem_ == nullptr) {
     ExchangeCurrentSize(1);
-    tagged_rep_or_elem_ = factory(arena);
+    factory(arena, tagged_rep_or_elem_);
     return tagged_rep_or_elem_;
   }
   absl::PrefetchToLocalCache(tagged_rep_or_elem_);
@@ -785,7 +912,7 @@ void* RepeatedPtrFieldBase::AddInternal(Factory factory) {
       return tagged_rep_or_elem_;
     }
     void*& result = *InternalExtend(1);
-    result = factory(arena);
+    factory(arena, result);
     Rep* r = rep();
     r->allocated_size = 2;
     ExchangeCurrentSize(2);
@@ -802,68 +929,96 @@ void* RepeatedPtrFieldBase::AddInternal(Factory factory) {
   }
   ++r->allocated_size;
   void*& result = r->elements[ExchangeCurrentSize(current_size_ + 1)];
-  result = factory(arena);
+  factory(arena, result);
   return result;
 }
 
 PROTOBUF_EXPORT void InternalOutOfLineDeleteMessageLite(MessageLite* message);
 
+// Encapsulates the minimally required subset of T's properties in a
+// `RepeatedPtrField<T>` specialization so the type-agnostic
+// `RepeatedPtrFieldBase` could do its job without knowing T.
+//
+// This generic definition is for types derived from `MessageLite`. That is
+// statically asserted, but only where a non-conforming type would emit a
+// compile-time diagnostic that lacks proper guidance for fixing. Asserting
+// at the top level isn't possible, because some template argument types are not
+// yet fully defined at the instantiation point.
+//
+// Explicit specializations are provided for `std::string` and
+// `StringPieceField` further below.
 template <typename GenericType>
 class GenericTypeHandler {
  public:
   using Type = GenericType;
 
-  static constexpr auto GetNewFunc() { return Arena::DefaultConstruct<Type>; }
+  // NOTE: Can't `static_assert(std::is_base_of<MessageLite, Type>)` here,
+  // because the type is not yet fully defined at this point sometimes.
+
+  static ElementFactory GetNewFunc() {
+    return [](Arena* arena, void*& ptr) {
+      ptr = Arena::DefaultConstruct<Type>(arena);
+    };
+  }
+  static ElementFactory GetNewFromPrototypeFunc(const Type* prototype) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
+    ABSL_DCHECK(prototype != nullptr);
+    return
+        [prototype](Arena* arena, void*& ptr) { ptr = prototype->New(arena); };
+  }
   static inline Arena* GetArena(Type* value) {
     return Arena::InternalGetArena(value);
   }
 
   static inline Type* New(Arena* arena, Type&& value) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
     return Arena::Create<Type>(arena, std::move(value));
   }
+  static inline Type* NewFromPrototype(const Type* prototype,
+                                       Arena* arena = nullptr) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
+    ABSL_DCHECK(prototype != nullptr);
+    return prototype->New(arena);
+  }
   static inline void Delete(Type* value, Arena* arena) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
     if (arena != nullptr) return;
-#ifdef __cpp_if_constexpr
-    if constexpr (std::is_base_of<MessageLite, Type>::value) {
       // Using virtual destructor to reduce generated code size that would have
       // happened otherwise due to inlined `~Type()`.
       InternalOutOfLineDeleteMessageLite(value);
-    } else {
-      delete value;
-    }
-#else
-    delete value;
-#endif
   }
-  static inline void Clear(Type* value) { value->Clear(); }
+  static inline void Clear(Type* value) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
+    value->Clear();
+  }
+  static inline void Merge(const Type& from, Type* to) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
+    to->CheckTypeAndMergeFrom(from);
+  }
   static inline size_t SpaceUsedLong(const Type& value) {
+    static_assert(std::is_base_of<MessageLite, Type>::value, "");
     return value.SpaceUsedLong();
   }
 };
-
-template <>
-inline Arena* GenericTypeHandler<MessageLite>::GetArena(MessageLite* value) {
-  return value->GetArena();
-}
-
-// Message specialization bodies defined in message.cc. This split is necessary
-// to allow proto2-lite (which includes this header) to be independent of
-// Message.
-template <>
-PROTOBUF_EXPORT Arena* GenericTypeHandler<Message>::GetArena(Message* value);
-
-PROTOBUF_EXPORT void* NewStringElement(Arena* arena);
 
 template <>
 class GenericTypeHandler<std::string> {
  public:
   using Type = std::string;
 
-  static constexpr auto GetNewFunc() { return NewStringElement; }
+  static ElementFactory GetNewFunc() {
+    return [](Arena* arena, void*& ptr) { ptr = Arena::Create<Type>(arena); };
+  }
+  static ElementFactory GetNewFromPrototypeFunc(const Type* /*prototype*/) {
+    return GetNewFunc();
+  }
   static inline Arena* GetArena(Type*) { return nullptr; }
 
   static PROTOBUF_NOINLINE Type* New(Arena* arena, Type&& value) {
     return Arena::Create<Type>(arena, std::move(value));
+  }
+  static inline Type* NewFromPrototype(const Type*, Arena* arena) {
+    return New(arena, {});
   }
   static inline void Delete(Type* value, Arena* arena) {
     if (arena == nullptr) {
@@ -872,10 +1027,11 @@ class GenericTypeHandler<std::string> {
   }
   static inline void Clear(Type* value) { value->clear(); }
   static inline void Merge(const Type& from, Type* to) { *to = from; }
-  static size_t SpaceUsedLong(const Type& value) {
+  static inline size_t SpaceUsedLong(const Type& value) {
     return sizeof(value) + StringSpaceUsedExcludingSelfLong(value);
   }
 };
+
 
 }  // namespace internal
 
@@ -1016,6 +1172,8 @@ class RepeatedPtrField final : private internal::RepeatedPtrFieldBase {
   // resizes the pointer array; it doesn't allocate any objects.  If the
   // array is grown, it will always be at least doubled in size.
   void Reserve(int new_size);
+  // DO NOT SUBMIT: Must be SFINAE'd to only be enabled for MessageLite/Message.
+  void Reserve(int new_size, const Element* prototype);
 
   int Capacity() const;
 
@@ -1184,9 +1342,8 @@ class RepeatedPtrField final : private internal::RepeatedPtrFieldBase {
   using DestructorSkippable_ = void;
 
   friend class Arena;
-
+  friend class internal::ExtensionSet;
   friend class internal::TcParser;
-
   template <typename T>
   friend struct WeakRepeatedPtrField;
 
@@ -1198,6 +1355,9 @@ class RepeatedPtrField final : private internal::RepeatedPtrFieldBase {
 
 
   void AddAllocatedForParse(Element* p) {
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(internal::AllocTraits::FromType<Element>());
+    }
     return RepeatedPtrFieldBase::AddAllocatedForParse(p);
   }
 };
@@ -1320,17 +1480,29 @@ inline Element* RepeatedPtrField<Element>::Mutable(int index)
 
 template <typename Element>
 inline Element* RepeatedPtrField<Element>::Add() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  if constexpr (PROTOBUF_IS_COMPLETE_TYPE(Element)) {
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(internal::AllocTraits::FromType<Element>());
+    }
+  }
   return RepeatedPtrFieldBase::Add<TypeHandler>();
 }
 
 template <typename Element>
 inline void RepeatedPtrField<Element>::Add(Element&& value) {
+  if (!is_alloc_traits_set()) {
+    set_alloc_traits(internal::AllocTraits::FromValue(value));
+  }
   RepeatedPtrFieldBase::Add<TypeHandler>(std::move(value));
 }
 
 template <typename Element>
 template <typename Iter>
 inline void RepeatedPtrField<Element>::Add(Iter begin, Iter end) {
+  if (begin == end) return;
+  if (!is_alloc_traits_set()) {
+    set_alloc_traits(internal::AllocTraits::FromValue(*begin));
+  }
   if (std::is_base_of<
           std::forward_iterator_tag,
           typename std::iterator_traits<Iter>::iterator_category>::value) {
@@ -1426,17 +1598,32 @@ template <typename Element>
 inline void RepeatedPtrField<Element>::MergeFrom(
     const RepeatedPtrField& other) {
   if (other.empty()) return;
+  if constexpr (PROTOBUF_IS_COMPLETE_TYPE(Element)) {
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(internal::AllocTraits::FromValue(other));
+    }
+  }
   RepeatedPtrFieldBase::MergeFrom<Element>(other);
 }
 
 template <typename Element>
 inline void RepeatedPtrField<Element>::CopyFrom(const RepeatedPtrField& other) {
+  if constexpr (PROTOBUF_IS_COMPLETE_TYPE(Element)) {
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(internal::AllocTraits::FromType<Element>());
+    }
+  }
   RepeatedPtrFieldBase::CopyFrom<TypeHandler>(other);
 }
 
 template <typename Element>
 template <typename Iter>
 inline void RepeatedPtrField<Element>::Assign(Iter begin, Iter end) {
+  if constexpr (PROTOBUF_IS_COMPLETE_TYPE(Element)) {
+    if (!is_alloc_traits_set()) {
+      set_alloc_traits(internal::AllocTraits::FromType<Element>());
+    }
+  }
   Clear();
   Add(begin, end);
 }
@@ -1507,11 +1694,17 @@ inline size_t RepeatedPtrField<Element>::SpaceUsedExcludingSelfLong() const {
 
 template <typename Element>
 inline void RepeatedPtrField<Element>::AddAllocated(Element* value) {
+  if (value != nullptr && !is_alloc_traits_set()) {
+    set_alloc_traits(internal::AllocTraits::FromValue(*value));
+  }
   RepeatedPtrFieldBase::AddAllocated<TypeHandler>(value);
 }
 
 template <typename Element>
 inline void RepeatedPtrField<Element>::UnsafeArenaAddAllocated(Element* value) {
+  if (value != nullptr && !is_alloc_traits_set()) {
+    set_alloc_traits(internal::AllocTraits::FromValue(*value));
+  }
   RepeatedPtrFieldBase::UnsafeArenaAddAllocated<TypeHandler>(value);
 }
 
@@ -1528,6 +1721,20 @@ inline Element* RepeatedPtrField<Element>::UnsafeArenaReleaseLast() {
 
 template <typename Element>
 inline void RepeatedPtrField<Element>::Reserve(int new_size) {
+  // if constexpr (PROTOBUF_IS_COMPLETE_TYPE(Element)) {
+  //   if (!is_alloc_traits_set()) {
+  //     set_alloc_traits(internal::AllocTraits::FromType<Element>());
+  //   }
+  // }
+  return RepeatedPtrFieldBase::Reserve(new_size);
+}
+
+template <typename Element>
+inline void RepeatedPtrField<Element>::Reserve(int new_size,
+                                               const Element* prototype) {
+  if (!is_alloc_traits_set()) {
+    set_alloc_traits(internal::AllocTraits::FromValue(*prototype));
+  }
   return RepeatedPtrFieldBase::Reserve(new_size);
 }
 
