@@ -288,11 +288,14 @@ static upb_Message* _upb_Decoder_ReuseSubMessage(
   upb_Message* existing =
       UPB_PRIVATE(_upb_TaggedMessagePtr_GetEmptyMessage)(tagged);
   upb_Message* promoted = _upb_Decoder_NewSubMessage(d, subs, field, target);
-  size_t size;
-  const char* unknown = upb_Message_GetUnknown(existing, &size);
-  upb_DecodeStatus status = upb_Decode(unknown, size, promoted, subl, d->extreg,
-                                       d->options, &d->arena);
-  if (status != kUpb_DecodeStatus_Ok) _upb_Decoder_ErrorJmp(d, status);
+  uintptr_t iter = kUpb_Message_UnknownBegin;
+  upb_StringView unknown;
+  while (upb_Message_NextUnknown(existing, &unknown, &iter)) {
+    upb_DecodeStatus status =
+        upb_Decode(unknown.data, unknown.size, promoted, subl, d->extreg,
+                   d->options, &d->arena);
+    if (status != kUpb_DecodeStatus_Ok) _upb_Decoder_ErrorJmp(d, status);
+  }
   return promoted;
 }
 
@@ -663,19 +666,18 @@ static const char* _upb_Decoder_DecodeToMap(
   ptr = _upb_Decoder_DecodeSubMessage(d, ptr, &ent.message, subs, field,
                                       val->size);
   // check if ent had any unknown fields
-  size_t size;
-  upb_Message_GetUnknown(&ent.message, &size);
-  if (size != 0) {
+  uintptr_t iter = kUpb_Message_UnknownBegin;
+  upb_StringView unknown;
+  if (upb_Message_NextUnknown(&ent.message, &unknown, &iter)) {
     char* buf;
     size_t size;
     uint32_t tag =
         ((uint32_t)field->UPB_PRIVATE(number) << 3) | kUpb_WireType_Delimited;
-    upb_EncodeStatus status =
-        upb_Encode(&ent.message, entry, 0, &d->arena, &buf, &size);
+    upb_EncodeStatus status = upb_EncodeTagLengthPrefixed(
+        &ent.message, entry, 0, &d->arena, &buf, &size, tag);
     if (status != kUpb_EncodeStatus_Ok) {
       _upb_Decoder_ErrorJmp(d, kUpb_DecodeStatus_OutOfMemory);
     }
-    _upb_Decoder_AddUnknownVarints(d, msg, tag, size);
     if (!UPB_PRIVATE(_upb_Message_AddUnknown)(msg, buf, size, &d->arena)) {
       _upb_Decoder_ErrorJmp(d, kUpb_DecodeStatus_OutOfMemory);
     }
