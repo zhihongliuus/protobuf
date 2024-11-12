@@ -565,11 +565,22 @@ static void encode_message(upb_encstate* e, const upb_Message* msg,
   }
 
   if ((e->options & kUpb_EncodeOption_SkipUnknown) == 0) {
-    size_t unknown_size;
-    const char* unknown = upb_Message_GetUnknown(msg, &unknown_size);
-
-    if (unknown) {
-      encode_bytes(e, unknown, unknown_size);
+    size_t unknown_size = 0;
+    uintptr_t iter = kUpb_Message_UnknownBegin;
+    upb_StringView unknown;
+    // Need to write in reverse order, but list is single-linked; scan to
+    // reserve capacity up front, then write in-order
+    while (upb_Message_NextUnknown(msg, &unknown, &iter)) {
+      unknown_size += unknown.size;
+    }
+    if (unknown_size != 0) {
+      encode_reserve(e, unknown_size);
+      char* ptr = e->ptr;
+      iter = kUpb_Message_UnknownBegin;
+      while (upb_Message_NextUnknown(msg, &unknown, &iter)) {
+        memcpy(ptr, unknown.data, unknown.size);
+        ptr += unknown.size;
+      }
     }
   }
 
@@ -616,7 +627,7 @@ static upb_EncodeStatus upb_Encoder_Encode(upb_encstate* const encoder,
                                            const upb_Message* const msg,
                                            const upb_MiniTable* const l,
                                            char** const buf, size_t* const size,
-                                           bool prepend_len) {
+                                           bool prepend_len, uint32_t tag) {
   // Unfortunately we must continue to perform hackery here because there are
   // code paths which blindly copy the returned pointer without bothering to
   // check for errors until much later (b/235839510). So we still set *buf to
@@ -626,6 +637,9 @@ static upb_EncodeStatus upb_Encoder_Encode(upb_encstate* const encoder,
     encode_message(encoder, msg, l, &encoded_msg_size);
     if (prepend_len) {
       encode_varint(encoder, encoded_msg_size);
+      if (tag != 0) {
+        encode_varint(encoder, tag);
+      }
     }
     *size = encoder->limit - encoder->ptr;
     if (*size == 0) {
@@ -648,7 +662,7 @@ static upb_EncodeStatus upb_Encoder_Encode(upb_encstate* const encoder,
 static upb_EncodeStatus _upb_Encode(const upb_Message* msg,
                                     const upb_MiniTable* l, int options,
                                     upb_Arena* arena, char** buf, size_t* size,
-                                    bool prepend_len) {
+                                    bool prepend_len, uint32_t tag) {
   upb_encstate e;
   unsigned depth = (unsigned)options >> 16;
 
@@ -661,20 +675,28 @@ static upb_EncodeStatus _upb_Encode(const upb_Message* msg,
   e.options = options;
   _upb_mapsorter_init(&e.sorter);
 
-  return upb_Encoder_Encode(&e, msg, l, buf, size, prepend_len);
+  return upb_Encoder_Encode(&e, msg, l, buf, size, prepend_len, tag);
 }
 
 upb_EncodeStatus upb_Encode(const upb_Message* msg, const upb_MiniTable* l,
                             int options, upb_Arena* arena, char** buf,
                             size_t* size) {
-  return _upb_Encode(msg, l, options, arena, buf, size, false);
+  return _upb_Encode(msg, l, options, arena, buf, size, false, 0);
 }
 
 upb_EncodeStatus upb_EncodeLengthPrefixed(const upb_Message* msg,
                                           const upb_MiniTable* l, int options,
                                           upb_Arena* arena, char** buf,
                                           size_t* size) {
-  return _upb_Encode(msg, l, options, arena, buf, size, true);
+  return _upb_Encode(msg, l, options, arena, buf, size, true, 0);
+}
+upb_EncodeStatus upb_EncodeTagLengthPrefixed(const upb_Message* msg,
+                                             const upb_MiniTable* l,
+                                             int options, upb_Arena* arena,
+                                             char** buf, size_t* size,
+                                             uint32_t tag) {
+  UPB_ASSERT(tag != 0);
+  return _upb_Encode(msg, l, options, arena, buf, size, true, tag);
 }
 
 const char* upb_EncodeStatus_String(upb_EncodeStatus status) {

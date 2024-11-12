@@ -182,8 +182,14 @@ TEST(GeneratedCode, Extensions) {
                                                 arena);
 
   // Get unknown extension bytes before promotion.
-  size_t start_len;
-  upb_Message_GetUnknown(UPB_UPCAST(base_msg), &start_len);
+  size_t start_len = 0;
+  {
+    upb_StringView data;
+    uintptr_t iter = kUpb_Message_UnknownBegin;
+    while (upb_Message_NextUnknown(UPB_UPCAST(base_msg), &data, &iter)) {
+      start_len += data.size;
+    }
+  }
   EXPECT_GT(start_len, 0);
   EXPECT_EQ(0, upb_Message_ExtensionCount(UPB_UPCAST(base_msg)));
 
@@ -236,8 +242,14 @@ TEST(GeneratedCode, Extensions) {
   EXPECT_EQ(kUpb_GetExtension_Ok, promote_status);
   EXPECT_EQ(9, upb_test_ModelExtension2_i(ext2));
 
-  size_t end_len;
-  upb_Message_GetUnknown(UPB_UPCAST(base_msg), &end_len);
+  size_t end_len = 0;
+  {
+    upb_StringView data;
+    uintptr_t iter = kUpb_Message_UnknownBegin;
+    while (upb_Message_NextUnknown(UPB_UPCAST(base_msg), &data, &iter)) {
+      end_len += data.size;
+    }
+  }
   EXPECT_LT(end_len, start_len);
   EXPECT_EQ(6, upb_Message_ExtensionCount(UPB_UPCAST(base_msg)));
 
